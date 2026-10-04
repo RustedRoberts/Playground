@@ -1,0 +1,10 @@
+ColumnName,ColumnOrdinal,DataType,ColumnType
+TimeGenerated,0,System.DateTime,datetime
+Id,1,System.String,string
+ObservableKey,2,System.String,string
+ObservableValue,3,System.String,string
+IsActive,4,System.SByte,bool
+Confidence,5,System.Int32,int
+ValidFrom,6,System.DateTime,datetime
+ValidUntil,7,System.DateTime,datetime
+SourceSystem,8,System.String,string

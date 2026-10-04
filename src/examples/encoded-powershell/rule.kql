@@ -1,0 +1,6 @@
+// Encoded PowerShell execution (synthetic worked example)
+DeviceProcessEvents
+| where Timestamp > ago(1h)
+| where FileName in~ ("powershell.exe", "pwsh.exe")
+| where ProcessCommandLine has_any ("-enc", "-encodedcommand")
+| project Timestamp, TenantId, DeviceName, DeviceId, AccountName, ProcessCommandLine
