@@ -32,7 +32,7 @@ export interface ExecutableDefinition {
 // Hyphen, forward slash, and the Unicode en dash, em dash and horizontal bar, which
 // PowerShell accepts in place of a hyphen. Written as code points so the source file
 // contains no dash characters other than the hyphen.
-export const POWERSHELL_PREFIX_CHARACTERS = ['-', '/', '–', '—', '―'];
+export const POWERSHELL_PREFIX_CHARACTERS = ['-', '/', '\u2013', '\u2014', '\u2015'];
 
 export const POWERSHELL: ExecutableDefinition = {
   id: 'powershell',

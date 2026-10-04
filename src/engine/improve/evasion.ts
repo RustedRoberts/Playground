@@ -132,7 +132,7 @@ export interface EvasionResult extends ModuleResult {
   sampleCounts?: { column: string; rows: number; original: number; hardened: number };
 }
 
-const DASHES: Record<string, string> = { '–': 'en dash', '—': 'em dash', '―': 'horizontal bar' };
+const DASHES: Record<string, string> = { '\u2013': 'en dash', '\u2014': 'em dash', '\u2015': 'horizontal bar' };
 
 function variantsFor(exe: ExecutableDefinition, g: ParameterGroup): { text: string; description: string }[] {
   const p = g.parameter;
