@@ -1,7 +1,7 @@
 // Runs the improvement modules in a fixed order and assembles the annotated output.
 import { ASIM_PARSERS, assess, detectPlatform, type Assessment, type AssessmentInputs } from '../assess';
 import { referenceFindings } from '../checks';
-import { normaliseLayout, parseQuery, tokenize, type ParsedQuery } from '../kql';
+import { normaliseLayout, parseQuery, tokenize, type Operator, type ParsedQuery } from '../kql';
 import type { Category, ChangeNote, Finding, OutputLine, Platform, ReferenceTable } from '../types';
 import { SHAPING_OPERATORS, emptyResult, render, type EngineContext, type ModuleResult } from './context';
 import { runEntity, type EntityOptions, type EntityResult } from './entity';
@@ -42,6 +42,40 @@ export interface ImproveOutput {
   findings: Finding[];
 }
 
+const ASSIGNING_OPERATORS = new Set(['extend', 'project', 'mv-expand', 'mv-apply', 'project-rename']);
+
+/** Finds `Name = expression` assignments at the top level of the operators before the anchor. */
+export function derivedColumns(operators: Operator[], anchor?: Operator): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const op of operators) {
+    if (op === anchor) break;
+    if (!ASSIGNING_OPERATORS.has(op.name)) continue;
+    const toks = tokenize(op.text).filter((t) => t.type !== 'ws' && t.type !== 'comment');
+    let depth = 0;
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i];
+      if (t.type === 'punct' && '([{'.includes(t.text)) depth++;
+      else if (t.type === 'punct' && ')]}'.includes(t.text)) depth--;
+      else if (depth === 0 && t.type === 'ident' && toks[i + 1]?.text === '=' && toks[i - 1]?.text !== '.') {
+        // The expression runs to the next top-level comma.
+        let d = 0;
+        let j = i + 2;
+        const start = toks[j]?.start ?? t.end;
+        let end = start;
+        for (; j < toks.length; j++) {
+          const u = toks[j];
+          if (u.type === 'punct' && '([{'.includes(u.text)) d++;
+          else if (u.type === 'punct' && ')]}'.includes(u.text)) d--;
+          else if (d === 0 && u.text === ',') break;
+          end = u.end;
+        }
+        out.set(t.text, op.text.slice(start, end));
+      }
+    }
+  }
+  return out;
+}
+
 export function buildContext(parsed: ParsedQuery, platform: Platform, tables: ReferenceTable[]): EngineContext {
   const main = parsed.main;
   const baseName = main?.sourceTable;
@@ -62,6 +96,7 @@ export function buildContext(parsed: ParsedQuery, platform: Platform, tables: Re
     topLine: main ? main.statement.startLine : 0,
     identifiersLower,
     usedLetNames: new Set(parsed.letNames.map((n) => n.toLowerCase())),
+    derivedColumns: derivedColumns(main?.operators ?? [], anchorOperator),
   };
 }
 

@@ -2,7 +2,7 @@
 import { quote } from '../kql';
 import { columnsOf, distinctValues, hasColumn } from '../reference';
 import type { ReferenceTable } from '../types';
-import { emptyResult, queryMentions, uniqueLetName, type EngineContext, type ModuleResult } from './context';
+import { emptyResult, isAvailable, queryMentions, uniqueLetName, type EngineContext, type ModuleResult } from './context';
 
 type ObservableType = 'sha256' | 'sha1' | 'md5' | 'ip' | 'domain' | 'url';
 
@@ -47,13 +47,25 @@ export function observableChoices(ctx: EngineContext): ObservableChoice[] {
   const choices: (ObservableChoice & { rank: number })[] = [];
   RULES.forEach((rule, ruleIndex) => {
     rule.columns.forEach((col, colIndex) => {
-      if (!hasColumn(ctx.base, col)) return;
+      if (!isAvailable(ctx, col)) return;
       const referenced = ctx.identifiersLower.has(col.toLowerCase());
       const ownHashOfSystemBinary = filtersSystemBinary && ['sha256', 'sha1', 'md5'].includes(rule.type) && !col.startsWith('InitiatingProcess');
       const rank = (referenced ? 0 : 1000) + (ownHashOfSystemBinary ? 500 : 0) + ruleIndex * 10 + colIndex;
       choices.push({ column: col, type: rule.type, label: rule.label, referenced, rank });
     });
   });
+  // Columns the rule derives itself, matched on their name (for example InitiatingIpAddress).
+  const derivedPatterns: { type: ObservableType; pattern: RegExp }[] = [
+    { type: 'sha256', pattern: /sha-?256/i }, { type: 'sha1', pattern: /sha-?1(?!\d)/i }, { type: 'md5', pattern: /md5/i },
+    { type: 'ip', pattern: /(ip|ipaddress|ipaddr)$/i }, { type: 'url', pattern: /url$/i }, { type: 'domain', pattern: /(domain|fqdn)$/i },
+  ];
+  for (const name of ctx.derivedColumns.keys()) {
+    if (choices.some((c) => c.column === name)) continue;
+    const match = derivedPatterns.find((d) => d.pattern.test(name));
+    if (!match) continue;
+    const rule = RULES.find((x) => x.type === match.type) as ObservableRule;
+    choices.push({ column: name, type: rule.type, label: rule.label, referenced: true, rank: 100 + RULES.indexOf(rule) });
+  }
   return choices.sort((a, b) => a.rank - b.rank).map(({ rank: _rank, ...c }) => c);
 }
 
@@ -163,7 +175,8 @@ export function runThreatIntel(ctx: EngineContext, opts: TiOptions): TiResult {
   });
   r.outputColumns.push(choice.column, 'TiMatch');
   if (confidenceCol) r.outputColumns.push('TiConfidence');
-  if (ctx.baseName) r.uses.push({ table: ctx.baseName, column: choice.column, cat: 'T' });
+  const derived = ctx.derivedColumns.has(choice.column) && !hasColumn(ctx.base, choice.column);
+  if (ctx.baseName && !derived) r.uses.push({ table: ctx.baseName, column: choice.column, cat: 'T' });
 
   r.status = 'applied';
   r.summary = `Checks ${choice.column} (${choice.label}) against active indicators in ${ti.name}.`;
@@ -174,7 +187,9 @@ export function runThreatIntel(ctx: EngineContext, opts: TiOptions): TiResult {
     watch: `Only useful if the indicator feeds in this tenant include ${rule.label} indicators.`,
   });
 
-  if (ctx.base.sample?.length && ti.sample?.length) {
+  if (derived) {
+    r.findings.push({ severity: 'info', cat: 'T', title: `${choice.column} is created by the rule, so indicator matches were not tested against the raw sample`, detail: 'Run the improved query to confirm the lookup.' });
+  } else if (ctx.base.sample?.length && ti.sample?.length) {
     // Only indicators the query would keep: right type, active and unexpired.
     const now = Date.now();
     const live = ti.sample.filter((row) => {

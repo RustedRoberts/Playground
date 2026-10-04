@@ -24,6 +24,25 @@ export interface EngineContext {
   /** Lower-cased text of every identifier in the original query. */
   identifiersLower: Set<string>;
   usedLetNames: Set<string>;
+  /**
+   * Columns the rule creates itself (extend, project or mv-expand assignments) before the
+   * enrichment point, mapped to the expression that creates them. They are not in the
+   * uploaded schema but can still be used as join keys.
+   */
+  derivedColumns: Map<string, string>;
+}
+
+/** True when a column exists in the base schema or is created by the rule before the enrichment point. */
+export function isAvailable(ctx: EngineContext, column: string): boolean {
+  if (ctx.derivedColumns.has(column)) return true;
+  return !!ctx.base && columnsOfBase(ctx).includes(column);
+}
+
+function columnsOfBase(ctx: EngineContext): string[] {
+  const t = ctx.base;
+  if (!t) return [];
+  if (t.schema?.length) return t.schema.map((c) => c.name);
+  return Object.keys(t.sample?.[0] ?? {});
 }
 
 export type Edit =

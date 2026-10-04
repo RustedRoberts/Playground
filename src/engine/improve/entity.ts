@@ -1,7 +1,7 @@
 // Entity enrichment (pattern A1): join IdentityInfo on the strongest shared identifier.
 import { columnType, columnsOf, distinctValues, hasColumn } from '../reference';
 import type { ReferenceTable } from '../types';
-import { emptyResult, queryMentions, type EngineContext, type ModuleResult } from './context';
+import { emptyResult, isAvailable, queryMentions, type EngineContext, type ModuleResult } from './context';
 
 export interface KeyPair {
   id: string;
@@ -9,6 +9,10 @@ export interface KeyPair {
   right: string;
   strength: 'strong' | 'weak';
   referenced: boolean;
+  /** The left column is created by the rule (for example with extend) rather than read from the table. */
+  derived: boolean;
+  /** The rule lower-cases the left column, so the IdentityInfo side is lower-cased to match. */
+  lowercase: boolean;
 }
 
 interface KeyRule {
@@ -41,15 +45,32 @@ export function identityTable(tables: ReferenceTable[]): ReferenceTable | undefi
   return tables.find((t) => t.role === 'entity');
 }
 
+// Columns the rule derives itself are matched on their name, so names such as
+// TargetAadUserId or InitiatingUserObjectId are recognised as well as the standard ones.
+const DERIVED_NAME_RULES: { pattern: RegExp; right: string[]; strength: 'strong' | 'weak' }[] = [
+  { pattern: /(ObjectId|AadUserId|AadId|UserObjectId)$/i, right: ['AccountObjectId'], strength: 'strong' },
+  { pattern: /Sid$/i, right: ['AccountSID', 'OnPremSid', 'AccountSid'], strength: 'strong' },
+  { pattern: /(Upn|UserPrincipalName)$/i, right: ['AccountUpn', 'AccountUPN'], strength: 'weak' },
+];
+
 export function keyPairs(ctx: EngineContext, identity: ReferenceTable | undefined): KeyPair[] {
   if (!ctx.base || !identity) return [];
   const pairs: KeyPair[] = [];
+  const add = (left: string, rightOptions: string[], strength: 'strong' | 'weak') => {
+    const right = rightOptions.find((r) => hasColumn(identity, r));
+    if (!right || pairs.some((p) => p.left === left)) return;
+    const derived = ctx.derivedColumns.has(left) && !hasColumn(ctx.base, left);
+    const lowercase = derived && /\btolower\s*\(/i.test(ctx.derivedColumns.get(left) ?? '');
+    pairs.push({ id: `${left}=${right}`, left, right, strength, referenced: ctx.identifiersLower.has(left.toLowerCase()), derived, lowercase });
+  };
   for (const rule of KEY_RULES) {
     if (rule.tables && !rule.tables.includes(ctx.baseName ?? '')) continue;
-    if (!hasColumn(ctx.base, rule.left)) continue;
-    const right = rule.right.find((r) => hasColumn(identity, r));
-    if (!right) continue;
-    pairs.push({ id: `${rule.left}=${right}`, left: rule.left, right, strength: rule.strength, referenced: ctx.identifiersLower.has(rule.left.toLowerCase()) });
+    if (!isAvailable(ctx, rule.left)) continue;
+    add(rule.left, rule.right, rule.strength);
+  }
+  for (const name of ctx.derivedColumns.keys()) {
+    const rule = DERIVED_NAME_RULES.find((r) => r.pattern.test(name));
+    if (rule) add(name, rule.right, rule.strength);
   }
   // Strong first, then identifiers the rule already uses, then rule order.
   return pairs.sort((a, b) => (a.strength === b.strength ? Number(b.referenced) - Number(a.referenced) : a.strength === 'strong' ? -1 : 1));
@@ -98,7 +119,10 @@ export function runEntity(ctx: EngineContext, opts: EntityOptions): EntityResult
   r.pairs = keyPairs(ctx, identity);
   if (r.pairs.length === 0) {
     r.status = 'not-applicable';
-    r.summary = `No account identifier is shared by ${ctx.baseName} and IdentityInfo in the uploaded schemas.`;
+    const dynamicCols = columnsOf(ctx.base).filter((c) => c.type === 'dynamic').map((c) => c.name);
+    r.summary = dynamicCols.length
+      ? `${ctx.baseName} has no top-level account identifier; identifiers are likely inside its dynamic columns (${dynamicCols.slice(0, 3).join(', ')}). Extract one in the rule before the project, for example | extend TargetAccountObjectId = tostring(<path to the id>), and this improvement will use it.`
+      : `No account identifier is shared by ${ctx.baseName} and IdentityInfo in the uploaded schemas.`;
     return r;
   }
   const pair = r.pairs.find((p) => p.id === opts.pairId) ?? r.pairs[0];
@@ -115,7 +139,8 @@ export function runEntity(ctx: EngineContext, opts: EntityOptions): EntityResult
   const timeCol = ['Timestamp', 'TimeGenerated'].find((c) => hasColumn(identity, c));
   // Rename any column that already exists on the base table, so nothing is silently overwritten.
   const outputs = r.columns.map((c) => ({ source: c, output: hasColumn(ctx.base, c) ? `Identity${c}` : c }));
-  const projectList = [pair.left === pair.right ? pair.left : `${pair.left} = ${pair.right}`, ...outputs.map((o) => (o.output === o.source ? o.source : `${o.output} = ${o.source}`))].join(', ');
+  const rightKey = pair.lowercase ? `tolower(${pair.right})` : pair.right;
+  const projectList = [pair.left === pair.right && !pair.lowercase ? pair.left : `${pair.left} = ${rightKey}`, ...outputs.map((o) => (o.output === o.source ? o.source : `${o.output} = ${o.source}`))].join(', ');
   const lines = ['| lookup kind=leftouter (', '    IdentityInfo'];
   if (timeCol) lines.push(`    | where ${timeCol} > ago(14d)`);
   lines.push(`    | where isnotempty(${pair.right})`);
@@ -126,7 +151,7 @@ export function runEntity(ctx: EngineContext, opts: EntityOptions): EntityResult
 
   r.edits.push({ type: 'insertAtAnchor', lines, cat: 'E' });
   r.outputColumns.push(...outputs.map((o) => o.output));
-  if (ctx.baseName) r.uses.push({ table: ctx.baseName, column: pair.left, cat: 'E' });
+  if (ctx.baseName && !pair.derived) r.uses.push({ table: ctx.baseName, column: pair.left, cat: 'E' });
   r.uses.push({ table: identity.name, column: pair.right, cat: 'E' });
   if (timeCol) r.uses.push({ table: identity.name, column: timeCol, cat: 'E' });
   r.columns.forEach((c) => r.uses.push({ table: identity.name, column: c, cat: 'E' }));
@@ -154,14 +179,21 @@ export function runEntity(ctx: EngineContext, opts: EntityOptions): EntityResult
   }
 
   // Type check on the join key.
-  const lt = columnType(ctx.base, pair.left);
+  const lt = pair.derived ? undefined : columnType(ctx.base, pair.left);
   const rt = columnType(identity, pair.right);
   if (lt && rt && lt !== 'unknown' && rt !== 'unknown' && lt !== rt) {
     r.findings.push({ severity: 'fail', cat: 'E', title: 'Join key types do not match', detail: `${pair.left} is ${lt} in ${ctx.baseName} but ${pair.right} is ${rt} in IdentityInfo. Convert one side before joining.` });
   }
 
   // Overlap between the samples.
-  if (ctx.base.sample?.length && identity.sample?.length) {
+  if (pair.derived) {
+    r.findings.push({
+      severity: 'info',
+      cat: 'E',
+      title: `${pair.left} is created by the rule, so the lookup was not tested against the raw sample`,
+      detail: `The base sample holds the raw table, before the rule's extend steps. ${pair.lowercase ? 'The rule lower-cases the value, so the IdentityInfo side is lower-cased too. ' : ''}Run the improved query to confirm the IdentityInfo columns are populated.`,
+    });
+  } else if (ctx.base.sample?.length && identity.sample?.length) {
     const leftValues = distinctValues(ctx.base.sample, pair.left, true);
     const rightValues = distinctValues(identity.sample, pair.right, true);
     const matched = [...leftValues].filter((v) => rightValues.has(v)).length;

@@ -177,3 +177,33 @@ describe('Soundness gate', () => {
     expect(out.findings.some((f) => /Soundness warning/.test(f.title))).toBe(true);
   });
 });
+
+describe('Identifiers the rule derives itself (AuditLogs)', () => {
+  // AuditLogs has no top-level account identifier: they sit inside dynamic columns.
+  const auditSchema = 'ColumnName,ColumnOrdinal,DataType,ColumnType\nTenantId,0,System.String,string\nTimeGenerated,2,System.DateTime,datetime\nOperationName,4,System.String,string\nInitiatedBy,20,System.Object,dynamic\nResult,22,System.String,string\nTargetResources,24,System.Object,dynamic\n';
+  const audit: ReferenceTable = { id: 'auditlogs', name: 'AuditLogs', role: 'base', schema: parseReferenceFile('AuditLogs_schema.csv', auditSchema).schema, problems: [] };
+  const identity: ReferenceTable = { ...tables[1], schema: [...tables[1].schema!, { name: 'TimeGenerated', type: 'datetime' }].filter((c) => c.name !== 'Timestamp') };
+
+  it('uses a lower-cased object ID extracted by the rule as a strong join key', () => {
+    const rule = 'AuditLogs\n| where OperationName =~ "Delete user"\n| mv-expand TargetResources\n| extend AccountObjectId = tolower(tostring(TargetResources.id))\n| project TimeGenerated, OperationName, AccountObjectId';
+    const out = improve({ query: rule, tables: [audit, identity], options: allOn, assessmentInputs: inputs });
+    expect(out.modules.E.status).toBe('applied');
+    expect(out.modules.E.pair).toMatchObject({ left: 'AccountObjectId', strength: 'strong', derived: true, lowercase: true });
+    expect(out.text).toContain('| project AccountObjectId = tolower(AccountObjectId), Department, JobTitle, AccountDisplayName');
+    expect(out.text).toContain('| where TimeGenerated > ago(14d)');
+    expect(out.findings.filter((f) => f.severity === 'fail')).toEqual([]);
+  });
+
+  it('recognises derived names such as TargetAadUserId', () => {
+    const rule = 'AuditLogs\n| extend TargetAadUserId = tostring(TargetResources[0].id)\n| project TimeGenerated, TargetAadUserId';
+    const out = improve({ query: rule, tables: [audit, identity], options: allOn, assessmentInputs: inputs });
+    expect(out.modules.E.pair?.left).toBe('TargetAadUserId');
+    expect(out.text).toContain('| project TargetAadUserId = AccountObjectId');
+  });
+
+  it('explains where the identifiers are when the rule extracts none', () => {
+    const out = improve({ query: 'AuditLogs\n| where OperationName =~ "Delete user"\n| project TimeGenerated', tables: [audit, identity], options: allOn, assessmentInputs: inputs });
+    expect(out.modules.E.status).toBe('not-applicable');
+    expect(out.modules.E.summary).toContain('InitiatedBy, TargetResources');
+  });
+});
