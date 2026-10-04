@@ -76,13 +76,36 @@ export function identityTable(tables: ReferenceTable[]): ReferenceTable | undefi
   return tables.find((t) => t.role === 'entity');
 }
 
-function expandsColumn(ctx: EngineContext, column: string): boolean {
+/**
+ * When the rule expands a dynamic column before the enrichment point, returns the name the
+ * expanded item goes by: the alias in `mv-apply Item = Column` or `mv-expand Item = Column`,
+ * or the column itself for a plain `mv-expand Column`.
+ */
+function expandedItem(ctx: EngineContext, column: string): string | undefined {
   for (const op of ctx.parsed.main?.operators ?? []) {
     if (op === ctx.anchorOperator) break;
-    if (op.name === 'mv-expand' && new RegExp(`\\b${column}\\b`).test(op.text)) return true;
+    if (op.name !== 'mv-expand' && op.name !== 'mv-apply') continue;
+    const alias = new RegExp(`\\b([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*${column}\\b`).exec(op.text);
+    if (alias) return alias[1];
+    if (new RegExp(`^\\|\\s*mv-(expand|apply)\\b[^|(]*\\b${column}\\b`).test(op.text)) return column;
   }
-  return false;
+  return undefined;
 }
+
+/** Which account a candidate describes, so several identifiers of one account are not counted twice. */
+function accountRole(c: KeyCandidate): string {
+  if (c.source === 'map') return /target/.test(c.id) ? 'target' : /initiator/.test(c.id) ? 'initiator' : c.id;
+  if (c.source === 'rule-key' || c.source === 'override') return c.source;
+  const prefix = c.expression.replace(/(ObjectId|UserObjectId|AadUserId|AadId|Sid|Upn|UserPrincipalName|Name)$/i, '').toLowerCase() || c.expression.toLowerCase();
+  return prefix.startsWith('target') ? 'target' : prefix;
+}
+
+/** Compares expressions ignoring whitespace, case and an outer tolower(). */
+const normalise = (s: string) => {
+  const t = s.replace(/\s+/g, '').toLowerCase();
+  const m = /^tolower\((.*)\)$/.exec(t);
+  return m ? m[1] : t;
+};
 
 export function keyCandidates(ctx: EngineContext, identity: ReferenceTable | undefined): KeyCandidate[] {
   if (!ctx.base || !identity) return [];
@@ -128,11 +151,16 @@ export function keyCandidates(ctx: EngineContext, identity: ReferenceTable | und
     if (!hasColumn(ctx.base, m.rootColumn)) continue;
     const right = firstRight(m.identityColumns);
     if (!right) continue;
-    const expanded = expandsColumn(ctx, m.rootColumn);
+    const item = expandedItem(ctx, m.rootColumn);
+    const expression = item && m.expandedTemplate ? m.expandedTemplate.replace('{item}', item) : m.expression;
+    // Skip a mapping the rule already extracts into a column of its own (for example
+    // DeletedByAadUserId = tostring(InitiatedBy.user.id)); that column is offered instead.
+    const extractedAs = [...ctx.derivedColumns.entries()].find(([, expr]) => normalise(expr) === normalise(expression) || normalise(expr) === normalise(m.expression));
+    if (extractedAs && out.some((c) => c.expression === extractedAs[0])) continue;
     out.push({
       id: `map:${m.id}`,
       label: m.label,
-      expression: expanded && m.expandedExpression ? m.expandedExpression : m.expression,
+      expression,
       right,
       strength: m.strength,
       source: 'map',
@@ -177,6 +205,8 @@ export interface EntityResult extends ModuleResult {
   columns: string[];
   /** IdentityInfo columns available to match a custom expression against. */
   overrideRights: string[];
+  /** Labels of the different accounts the rule involves, when there is more than one. */
+  accounts: string[];
 }
 
 /** Lower-cased identifier values for the base sample under a candidate, or undefined if they cannot be worked out. */
@@ -204,7 +234,7 @@ function identitySampleKeys(rows: Row[], right: string): Set<string> {
 
 export function runEntity(ctx: EngineContext, opts: EntityOptions): EntityResult {
   const identity = identityTable(ctx.tables);
-  const r: EntityResult = { ...emptyResult('E', 'needs-data', ''), candidates: [], columnChoices: [], columns: [], overrideRights: [] };
+  const r: EntityResult = { ...emptyResult('E', 'needs-data', ''), candidates: [], columnChoices: [], columns: [], overrideRights: [], accounts: [] };
 
   if (queryMentions(ctx, 'IdentityInfo')) {
     r.status = 'already-present';
@@ -234,7 +264,20 @@ export function runEntity(ctx: EngineContext, opts: EntityOptions): EntityResult
       return r;
     }
   } else {
-    candidate = r.candidates.find((c) => c.id === opts.candidateId) ?? r.candidates[0];
+    // A rule can involve several accounts (for example the user acted on and the user who
+    // acted). If it references more than one, the analyst must choose: guessing joins the
+    // wrong account silently.
+    const byRole = new Map<string, KeyCandidate>();
+    for (const c of r.candidates) if (c.referenced && !byRole.has(accountRole(c))) byRole.set(accountRole(c), c);
+    r.accounts = byRole.size > 1 ? [...byRole.values()].map((c) => c.label) : [];
+    candidate = r.candidates.find((c) => c.id === opts.candidateId);
+    if (!candidate && r.accounts.length === 0) candidate = r.candidates[0];
+    if (!candidate && r.accounts.length) {
+      r.status = 'not-applicable';
+      r.summary = `This rule involves more than one account (${r.accounts.join('; ')}). Choose which one to enrich.`;
+      r.findings.push({ severity: 'warn', cat: 'E', title: 'Choose which account to enrich', detail: `The rule refers to ${r.accounts.length} different accounts: ${r.accounts.join('; ')}. The tool will not guess, because joining the wrong one returns no enrichment without any error.` });
+      return r;
+    }
   }
 
   if (!candidate) {

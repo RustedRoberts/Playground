@@ -13,8 +13,11 @@ export interface IdentifierMapping {
   rootColumn: string;
   /** KQL expression on the raw table. */
   expression: string;
-  /** KQL expression once the rule has run `mv-expand <rootColumn>`. */
-  expandedExpression?: string;
+  /**
+   * KQL expression once the rule has expanded the root column with mv-expand or mv-apply.
+   * `{item}` is replaced with the expanded column or its alias.
+   */
+  expandedTemplate?: string;
   /** Path into the raw column value, used to resolve the identifier in sample rows. */
   samplePath: (string | number)[];
   /** IdentityInfo columns it can match, in order of preference. */
@@ -30,7 +33,7 @@ export const IDENTIFIER_MAP: Record<string, IdentifierMapping[]> = {
       label: 'Target account (TargetResources)',
       rootColumn: 'TargetResources',
       expression: 'tostring(TargetResources[0].id)',
-      expandedExpression: 'tostring(TargetResources.id)',
+      expandedTemplate: 'tostring({item}.id)',
       samplePath: ['TargetResources', 0, 'id'],
       identityColumns: ['AccountObjectId'],
       strength: 'strong',

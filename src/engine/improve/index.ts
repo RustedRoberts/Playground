@@ -56,7 +56,7 @@ export function derivedColumns(operators: Operator[], anchor?: Operator): Map<st
       const t = toks[i];
       if (t.type === 'punct' && '([{'.includes(t.text)) depth++;
       else if (t.type === 'punct' && ')]}'.includes(t.text)) depth--;
-      else if (depth === 0 && t.type === 'ident' && toks[i + 1]?.text === '=' && toks[i - 1]?.text !== '.') {
+      else if ((depth === 0 || op.name === 'mv-apply') && t.type === 'ident' && toks[i + 1]?.text === '=' && toks[i - 1]?.text !== '.') {
         // The expression runs to the next top-level comma.
         let d = 0;
         let j = i + 2;
@@ -83,6 +83,16 @@ export function buildContext(parsed: ParsedQuery, platform: Platform, tables: Re
   const anchorOperator = main?.operators.find((o) => SHAPING_OPERATORS.has(o.name));
   const anchorLine = anchorOperator ? anchorOperator.startLine : main ? main.statement.endLine + 1 : parsed.lines.length;
   const projectOperator = anchorOperator?.name === 'project' ? anchorOperator : undefined;
+  // Projects from the anchor onwards, until something drops columns wholesale.
+  const RESHAPING = new Set(['summarize', 'distinct', 'count', 'make-series', 'evaluate', 'top-nested']);
+  const projectOperators: Operator[] = [];
+  let laterReshape: Operator | undefined;
+  if (main && anchorOperator) {
+    for (const op of main.operators.slice(main.operators.indexOf(anchorOperator))) {
+      if (RESHAPING.has(op.name)) { laterReshape = op; break; }
+      if (op.name === 'project' || op.name === 'project-keep') projectOperators.push(op);
+    }
+  }
   const identifiersLower = new Set(tokenize(parsed.text).filter((t) => t.type === 'ident').map((t) => t.text.toLowerCase()));
   return {
     parsed,
@@ -93,6 +103,8 @@ export function buildContext(parsed: ParsedQuery, platform: Platform, tables: Re
     anchorLine: Math.min(anchorLine, parsed.lines.length),
     anchorOperator,
     projectOperator,
+    projectOperators,
+    laterReshape,
     topLine: main ? main.statement.startLine : 0,
     identifiersLower,
     usedLetNames: new Set(parsed.letNames.map((n) => n.toLowerCase())),
@@ -144,11 +156,11 @@ export function improve(input: ImproveInput): ImproveOutput {
     ...referenceFindings(parsed, input.tables, uses, ctx.baseName),
     ...ordered.flatMap((m) => m.findings),
   ];
-  if (ctx.anchorOperator?.name === 'summarize' && (E.status === 'applied' || T.status === 'applied')) {
+  if ((ctx.anchorOperator?.name === 'summarize' || ctx.laterReshape) && (E.status === 'applied' || T.status === 'applied')) {
     findings.push({
       severity: 'warn',
-      title: 'Enrichment is inserted before a summarize',
-      detail: 'Columns added by the lookups are dropped by summarize unless you add them to its by clause or aggregate them, for example with take_any().',
+      title: `Enrichment columns are dropped by a later ${ctx.laterReshape?.name ?? 'summarize'}`,
+      detail: `The ${ctx.laterReshape?.name ?? 'summarize'} on line ${(ctx.laterReshape ?? ctx.anchorOperator)!.startLine + 1} keeps only the columns it names. Add the enrichment columns to its by clause or aggregate them, for example with take_any(), or they will not reach the alert.`,
     });
   }
 

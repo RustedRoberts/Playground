@@ -19,6 +19,14 @@ export interface EngineContext {
   anchorOperator?: Operator;
   /** The final `| project` operator, if the query ends with one, so new columns can be appended to it. */
   projectOperator?: Operator;
+  /**
+   * Every top-level project or project-keep from the enrichment point onwards, up to the
+   * first operator that drops columns wholesale (summarize, distinct and similar). New
+   * columns are appended to each one, so a later explicit project cannot drop them.
+   */
+  projectOperators: Operator[];
+  /** A column-dropping operator after the enrichment point, if any. */
+  laterReshape?: Operator;
   /** Line before which new let statements are inserted. */
   topLine: number;
   /** Lower-cased text of every identifier in the original query. */
@@ -105,10 +113,12 @@ export function render(ctx: EngineContext, results: ModuleResult[]): RenderResul
     }
   }
 
-  // Columns appended to the final project line, grouped by category.
-  const appended: { text: string; cat: Category }[] = [];
-  if (ctx.projectOperator) {
-    const existing = new Set((ctx.projectOperator.text.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).map((s) => s.toLowerCase()));
+  // Columns appended to each project from the enrichment point onwards, keyed by the
+  // project's last line, so later explicit projects keep the new columns.
+  const appendedByLine = new Map<number, { text: string; cat: Category }[]>();
+  for (const op of ctx.projectOperators) {
+    const existing = new Set((op.text.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).map((s) => s.toLowerCase()));
+    const appended: { text: string; cat: Category }[] = [];
     for (const r of results) {
       for (const col of r.outputColumns) {
         if (existing.has(col.toLowerCase())) continue;
@@ -116,6 +126,7 @@ export function render(ctx: EngineContext, results: ModuleResult[]): RenderResul
         appended.push({ text: col, cat: r.cat });
       }
     }
+    if (appended.length) appendedByLine.set(op.endLine, appended);
   }
 
   const pushAdd = (lines: string[], cat: Category) => {
@@ -135,7 +146,8 @@ export function render(ctx: EngineContext, results: ModuleResult[]): RenderResul
       continue;
     }
 
-    if (ctx.projectOperator && i === ctx.projectOperator.endLine && appended.length) {
+    const appended = appendedByLine.get(i);
+    if (appended) {
       const line = src[i];
       const trailing = /(\s*(?:\/\/.*)?)$/.exec(line)?.[1] ?? '';
       const body = line.slice(0, line.length - trailing.length);

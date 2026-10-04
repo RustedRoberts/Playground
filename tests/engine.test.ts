@@ -249,3 +249,55 @@ describe('Nested identifiers and the standard key (AuditLogs)', () => {
     expect(text).toContain('| summarize arg_max(TimeGenerated, *) by IdentityInfo_Key');
   });
 });
+
+describe('Regression: deleted-user rule with a later join and explicit project', () => {
+  const auditSchema = 'ColumnName,ColumnOrdinal,DataType,ColumnType\nTimeGenerated,2,System.DateTime,datetime\nOperationName,4,System.String,string\nAdditionalDetails,18,System.Object,dynamic\nInitiatedBy,20,System.Object,dynamic\nTargetResources,24,System.Object,dynamic\n';
+  const audit: ReferenceTable = { id: 'auditlogs', name: 'AuditLogs', role: 'base', schema: parseReferenceFile('AuditLogs_schema.csv', auditSchema).schema, problems: [] };
+  const identity: ReferenceTable = { id: 'identityinfo', name: 'IdentityInfo', role: 'entity', schema: [
+    { name: 'TimeGenerated', type: 'datetime' }, { name: 'AccountObjectId', type: 'string' }, { name: 'AccountUPN', type: 'string' },
+    { name: 'AccountDisplayName', type: 'string' }, { name: 'Department', type: 'string' }, { name: 'JobTitle', type: 'string' }, { name: 'AssignedRoles', type: 'dynamic' },
+  ], problems: [] };
+  const rule = [
+    'AuditLogs',
+    '| where OperationName =~ "Delete user"',
+    '| mv-apply TargetResource = TargetResources on (',
+    '    where TargetResource.type == "User"',
+    '    | extend TargetUserPrincipalName = extract(@\'([a-f0-9]{32})?(.*)\', 2, tostring(TargetResource.userPrincipalName))',
+    ')',
+    '| extend',
+    '    DeletedByUserPrincipalName = tostring(InitiatedBy.user.userPrincipalName),',
+    '    DeletedByAadUserId = tostring(InitiatedBy.user.id)',
+    '| project',
+    '    Deletion_TimeGenerated = TimeGenerated,',
+    '    TargetUserPrincipalName,',
+    '    DeletedByAadUserId',
+    '| join kind=inner (',
+    '    AuditLogs',
+    '    | where OperationName =~ "Add user"',
+    '    | project-rename Creation_TimeGenerated = TimeGenerated',
+    ') on TargetUserPrincipalName',
+    '| project',
+    '    Creation_TimeGenerated,',
+    '    Deletion_TimeGenerated,',
+    '    TargetUserPrincipalName',
+    '| extend TargetName = tostring(split(TargetUserPrincipalName, "@", 0)[0])',
+  ].join('\n');
+
+  it('asks which account to enrich instead of guessing', () => {
+    const out = improve({ query: rule, tables: [audit, identity], options: allOn, assessmentInputs: inputs });
+    expect(out.modules.E.status).toBe('not-applicable');
+    expect(out.modules.E.accounts).toEqual(['DeletedByAadUserId (created by the rule)', 'Target account (TargetResources)']);
+    expect(out.modules.E.candidates.some((c) => c.id === 'map:auditlogs-initiator')).toBe(false);
+  });
+
+  it('uses the mv-apply alias for the target and carries the columns through the final project', () => {
+    const out = improve({ query: rule, tables: [audit, identity], options: { ...allOn, entity: { candidateId: 'map:auditlogs-target' } }, assessmentInputs: inputs });
+    expect(out.modules.E.status).toBe('applied');
+    expect(out.text).toContain('| extend IdentityInfo_Key = tolower(tostring(TargetResource.id))');
+    const mods = out.lines.filter((l) => l.kind === 'mod').map((l) => l.segs.map((s) => s.text).join(''));
+    expect(mods).toEqual([
+      '    DeletedByAadUserId, Department, JobTitle, AssignedRoles',
+      '    TargetUserPrincipalName, Department, JobTitle, AssignedRoles',
+    ]);
+  });
+});

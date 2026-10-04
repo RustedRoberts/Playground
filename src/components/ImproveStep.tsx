@@ -78,6 +78,7 @@ export function ImproveStep({ result, options, setOptions, onBack, onNext }: Pro
                   Account identifier
                   <select className="select" value={isOverride ? 'override' : m.E.candidate?.id ?? ''} onChange={(e) => setOptions({ ...options, entity: { ...options.entity, candidateId: e.target.value } })}>
                     {!m.E.candidates.length && !isOverride ? <option value="">None found</option> : null}
+                    {m.E.candidates.length && !m.E.candidate && !isOverride ? <option value="" disabled>Choose the account to enrich</option> : null}
                     {m.E.candidates.map((c) => <option key={c.id} value={c.id}>{c.label} ({c.strength})</option>)}
                     <option value="override">Custom expression</option>
                   </select>
