@@ -16,6 +16,7 @@ Keep each case in its own folder under `local-cases/` (ignored by git), for exam
    ```
 
 3. **Samples.** Export up to 100 rows of each table as JSON or CSV, named `<Table>_sample.json`. Step 2 of the tool generates the export queries for the rule you pasted, including an IdentityInfo sample taken for the same accounts as the base sample, so the lookup can be tested.
+   Use the export queries the tool generates where you can: they add the standard join keys `IdentityInfo_Key` and `ThreatIntel_Key` (lower-cased) to every sample, which is what lets the tool test the lookups against your data. Choose the account identifier on the Entity enrichment card first, because the export queries use it.
 4. **Expected result (optional but recommended).** Save your own hand-improved version as `expected.kql`, so the tool's output can be compared with it.
 
 Mask usernames, device names and account IDs in client data before exporting. Lab data avoids the problem entirely.

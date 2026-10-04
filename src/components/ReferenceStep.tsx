@@ -54,11 +54,13 @@ export function ReferenceStep(p: Props) {
   // Reference checks plus the join checks that depend on the uploaded samples.
   const referenceOnly = (p.result?.findings ?? []).filter((f) => f.cat !== 'H');
   const used = useMemo(() => new Set(identifiers(p.result?.text ?? '').map((i) => i.toLowerCase())), [p.result?.text]);
-  const identityKey = p.result?.modules.E.pair;
+  const entity = p.result?.modules.E;
+  const ti = p.result?.modules.T;
   const queries = p.result ? exportQueries(p.result.parsed, {
-    identity: p.tables.some((t) => t.role === 'entity'),
-    ti: p.tables.some((t) => t.role === 'threat-intel'),
-    identityKey: identityKey ? { left: identityKey.left, right: identityKey.right } : { left: 'AccountObjectId', right: 'AccountObjectId' },
+    includeIdentity: p.tables.some((t) => t.role === 'entity'),
+    includeTi: p.tables.some((t) => t.role === 'threat-intel'),
+    identity: entity?.candidate ? { expression: entity.candidate.expression, right: entity.candidate.right } : undefined,
+    ti: ti?.choice ? { expression: ti.choice.column, valueColumn: ti.valueColumn ?? 'ObservableValue', table: ti.tiTableName ?? 'ThreatIntelIndicators' } : undefined,
   }) : '';
 
   const example = (t: ReferenceTable, col: string): string => {
@@ -175,7 +177,7 @@ export function ReferenceStep(p: Props) {
 
           <Panel
             title="How to export these files"
-            sub="Run in Advanced Hunting or Log Analytics and export the results. The IdentityInfo sample is taken for the same accounts as the base sample, so the lookup can be tested."
+            sub="Run in Advanced Hunting or Log Analytics and export the results. Every sample carries the standard join keys IdentityInfo_Key and ThreatIntel_Key, lower-cased, and the enrichment samples are taken for the same accounts and observables as the base sample, so the lookups can be tested."
             actions={<button type="button" className="btn btn-small" onClick={async () => { if (await copyText(queries)) p.toast('Export queries copied'); }}>Copy export queries</button>}
           >
             <pre className="code-block">{queries}</pre>

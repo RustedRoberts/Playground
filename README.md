@@ -41,6 +41,19 @@ The engine is rules-based and deterministic. It does not call an AI service. Eac
 - **Threat intelligence** picks the observable to check (hash, IP address, domain or URL), preferring columns the rule already uses and, for built-in Windows binaries, the initiating process hash. ObservableKey values are taken from your indicator sample where present and flagged as assumed where not. Only active, unexpired indicators are used, compared in lower case.
 - **Evasion hardening** finds command-line conditions, identifies the executable from the rule's image name filter, and replaces literal parameter matches with a pattern covering every accepted prefix form and documented alias, with hyphen, forward slash or Unicode dash prefixes. Matching runs against a cleaned copy of the command line with carets, double quotes and simple string concatenation removed. Parameter aliases come from Microsoft Learn (`about_Pwsh` and `about_PowerShell_exe`), listed in `src/engine/library/parameters.ts`.
 
+## Standard join keys
+
+Every lookup joins on a standard key column, lower-cased on both sides, so a case difference can never cause a missed match:
+
+| Key | Base table side | Enrichment side |
+| --- | --- | --- |
+| `IdentityInfo_Key` | `tolower(<account identifier>)` | `tolower(AccountObjectId)` (or the matching IdentityInfo column) |
+| `ThreatIntel_Key` | `tolower(<observable>)` | `tolower(ObservableValue)` |
+
+The tool writes the keys into the improved rule and into the export queries on the Reference data step, so the rule, the samples and the lookups always agree. The account identifier comes from, in order: an `IdentityInfo_Key` the rule already creates; identifier columns in the schema or created by the rule (such as `AccountObjectId` or `TargetAadUserId`); the built-in map of nested identifiers in `src/engine/library/identifiers.ts` (AuditLogs target and initiator so far); or a custom expression typed on the Entity enrichment card. Nested paths are checked against the uploaded sample, so a wrong path shows as zero matches rather than failing silently.
+
+To support another table with nested identifiers, add an entry to `IDENTIFIER_MAP` with the KQL expression, the sample path and the IdentityInfo column it matches.
+
 ## Checks
 
 - Every column written by the tool exists in the uploaded schema (a failure here means the output must not be used).

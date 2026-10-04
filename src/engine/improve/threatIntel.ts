@@ -37,6 +37,9 @@ export interface ObservableChoice {
   referenced: boolean;
 }
 
+/** Standard join key: the lower-cased observable, carried by both sides of the lookup and by the samples. */
+export const TI_KEY = 'ThreatIntel_Key';
+
 export function tiTable(tables: ReferenceTable[]): ReferenceTable | undefined {
   return tables.find((t) => t.role === 'threat-intel');
 }
@@ -76,6 +79,9 @@ export interface TiOptions {
 export interface TiResult extends ModuleResult {
   choices: ObservableChoice[];
   choice?: ObservableChoice;
+  /** Indicator column holding the value, and the indicator table, once known. */
+  valueColumn?: string;
+  tiTableName?: string;
 }
 
 export function runThreatIntel(ctx: EngineContext, opts: TiOptions): TiResult {
@@ -159,7 +165,9 @@ export function runThreatIntel(ctx: EngineContext, opts: TiOptions): TiResult {
     r.uses.push(...[valueCol, ...latest].map((c) => ({ table: ti.name, column: c, cat: 'T' as const })));
   }
   if (timeCol) r.uses.push({ table: ti.name, column: timeCol, cat: 'T' });
-  const projectParts = [`TiJoinKey = tolower(${valueCol})`, `TiIndicator = ${valueCol}`];
+  r.valueColumn = valueCol;
+  r.tiTableName = ti.name;
+  const projectParts = [`${TI_KEY} = tolower(${valueCol})`, `TiIndicator = ${valueCol}`];
   if (confidenceCol) projectParts.push(`TiConfidence = ${confidenceCol}`);
   lines.push(`    | project ${projectParts.join(', ')};`);
   r.edits.push({ type: 'insertTop', lines, cat: 'T' });
@@ -168,8 +176,8 @@ export function runThreatIntel(ctx: EngineContext, opts: TiOptions): TiResult {
     type: 'insertAtAnchor',
     cat: 'T',
     lines: [
-      `| extend TiJoinKey = tolower(${choice.column})`,
-      `| lookup kind=leftouter ${letName} on TiJoinKey`,
+      `| extend ${TI_KEY} = tolower(${choice.column})`,
+      `| lookup kind=leftouter ${letName} on ${TI_KEY}`,
       '| extend TiMatch = isnotempty(TiIndicator)',
     ],
   });
@@ -183,12 +191,12 @@ export function runThreatIntel(ctx: EngineContext, opts: TiOptions): TiResult {
   r.notes.push({
     cat: 'T',
     title: `${rule.label} check`,
-    detail: `Looks up ${choice.column} against ${isNew ? 'active, unexpired' : 'active'} indicators from the last 14 days, comparing in lower case, and adds TiMatch${confidenceCol ? ' and TiConfidence' : ''} to each result.`,
+    detail: `Looks up ${choice.column} against ${isNew ? 'active, unexpired' : 'active'} indicators from the last 14 days, on the lower-cased ThreatIntel_Key carried by both sides, and adds TiMatch${confidenceCol ? ' and TiConfidence' : ''} to each result.`,
     watch: `Only useful if the indicator feeds in this tenant include ${rule.label} indicators.`,
   });
 
-  if (derived) {
-    r.findings.push({ severity: 'info', cat: 'T', title: `${choice.column} is created by the rule, so indicator matches were not tested against the raw sample`, detail: 'Run the improved query to confirm the lookup.' });
+  if (derived && !ctx.base.sample?.some((row) => row[TI_KEY] !== undefined)) {
+    r.findings.push({ severity: 'info', cat: 'T', title: `${choice.column} is created by the rule, so indicator matches were not tested against the raw sample`, detail: `Export the base sample with the export queries in Reference data, which add ${TI_KEY}, to test it.` });
   } else if (ctx.base.sample?.length && ti.sample?.length) {
     // Only indicators the query would keep: right type, active and unexpired.
     const now = Date.now();
@@ -200,8 +208,10 @@ export function runThreatIntel(ctx: EngineContext, opts: TiOptions): TiResult {
       if (until && !Number.isNaN(Date.parse(String(until))) && Date.parse(String(until)) < now) return false;
       return true;
     });
-    const tiValues = distinctValues(live, valueCol, true);
-    const hits = ctx.base.sample.filter((row) => tiValues.has(String(row[choice.column] ?? '').toLowerCase())).length;
+    // Prefer the standard key columns when the samples were exported with them.
+    const tiValues = live.some((row) => row[TI_KEY] !== undefined) ? distinctValues(live, TI_KEY, true) : distinctValues(live, valueCol, true);
+    const baseKey = ctx.base.sample.some((row) => row[TI_KEY] !== undefined) ? TI_KEY : choice.column;
+    const hits = ctx.base.sample.filter((row) => tiValues.has(String(row[baseKey] ?? '').toLowerCase())).length;
     r.findings.push({
       severity: hits > 0 ? 'pass' : 'info',
       cat: 'T',

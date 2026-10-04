@@ -30,7 +30,7 @@ export function ImproveStep({ result, options, setOptions, onBack, onNext }: Pro
   const toggle = (cat: Category, v: boolean) => setOptions({ ...options, enabled: { ...options.enabled, [cat]: v } });
   const lineCount = (cat: Category) => result.lines.filter((l) => l.kind !== 'del' && (l.cat === cat || l.segs.some((s) => s.cat === cat))).length;
 
-  const card = (cat: Category, body: ReactNode) => {
+  const card = (cat: Category, body: ReactNode, showBodyWhenOff = false) => {
     const r: ModuleResult = m[cat];
     const available = r.status === 'applied' || r.status === 'off';
     const on = r.status === 'applied';
@@ -41,7 +41,7 @@ export function ImproveStep({ result, options, setOptions, onBack, onNext }: Pro
           {available ? <Switch checked={on} onChange={(v) => toggle(cat, v)} label={`Apply ${CATEGORY_LABELS[cat]}`} /> : null}
         </div>
         <p style={{ fontSize: 14 }} className="muted">{r.summary}</p>
-        {on ? body : null}
+        {on || showBodyWhenOff ? body : null}
         <div className="row" style={{ gap: 6, marginTop: 'auto' }}>
           <span className="pill">{CATEGORY_PATTERNS[cat]}</span>
           <span className={`pill ${available ? '' : 'pill-dashed'}`}>{on ? `${lineCount(cat)} lines` : STATUS_LABEL[r.status]}</span>
@@ -70,35 +70,56 @@ export function ImproveStep({ result, options, setOptions, onBack, onNext }: Pro
       <div className="grid-cards">
         {CATEGORY_ORDER.map((cat) => {
           if (cat === 'E') {
+            const isOverride = options.entity.candidateId === 'override';
+            const showKeyChoice = m.E.status !== 'needs-data' && m.E.status !== 'already-present';
             return card('E', (
               <div className="options">
                 <label className="field">
-                  Join key
-                  <select className="select" value={m.E.pair?.id ?? ''} onChange={(e) => setOptions({ ...options, entity: { ...options.entity, pairId: e.target.value } })}>
-                    {m.E.pairs.map((pr) => <option key={pr.id} value={pr.id}>{pr.left} to {pr.right} ({pr.strength})</option>)}
+                  Account identifier
+                  <select className="select" value={isOverride ? 'override' : m.E.candidate?.id ?? ''} onChange={(e) => setOptions({ ...options, entity: { ...options.entity, candidateId: e.target.value } })}>
+                    {!m.E.candidates.length && !isOverride ? <option value="">None found</option> : null}
+                    {m.E.candidates.map((c) => <option key={c.id} value={c.id}>{c.label} ({c.strength})</option>)}
+                    <option value="override">Custom expression</option>
                   </select>
                 </label>
-                <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
-                  <legend className="subtle" style={{ marginBottom: 6 }}>IdentityInfo columns to add</legend>
-                  <div className="col-choices">
-                    {m.E.columnChoices.slice(0, 12).map((c) => (
-                      <label key={c}>
-                        <input
-                          type="checkbox"
-                          checked={m.E.columns.includes(c)}
-                          disabled={m.E.columns.length === 1 && m.E.columns.includes(c)}
-                          onChange={(e) => {
-                            const cols = e.target.checked ? [...m.E.columns, c] : m.E.columns.filter((x) => x !== c);
-                            setOptions({ ...options, entity: { ...options.entity, columns: cols } });
-                          }}
-                        />
-                        {c}
-                      </label>
-                    ))}
-                  </div>
-                </fieldset>
+                {isOverride ? (
+                  <>
+                    <label className="field">
+                      Expression that extracts the identifier
+                      <input className="input mono" value={options.entity.overrideExpression ?? ''} placeholder="tostring(TargetResources[0].id)" onChange={(e) => setOptions({ ...options, entity: { ...options.entity, overrideExpression: e.target.value } })} />
+                    </label>
+                    <label className="field">
+                      Matches IdentityInfo column
+                      <select className="select" value={options.entity.overrideRight ?? m.E.overrideRights[0] ?? ''} onChange={(e) => setOptions({ ...options, entity: { ...options.entity, overrideRight: e.target.value } })}>
+                        {m.E.overrideRights.map((c) => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </label>
+                  </>
+                ) : null}
+                {m.E.candidate ? <span className="subtle mono" style={{ fontSize: 12, wordBreak: "break-all" }}>IdentityInfo_Key = tolower({m.E.candidate.expression})</span> : null}
+                {m.E.candidate ? (
+                  <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
+                    <legend className="subtle" style={{ marginBottom: 6 }}>IdentityInfo columns to add</legend>
+                    <div className="col-choices">
+                      {m.E.columnChoices.slice(0, 12).map((c) => (
+                        <label key={c}>
+                          <input
+                            type="checkbox"
+                            checked={m.E.columns.includes(c)}
+                            disabled={m.E.columns.length === 1 && m.E.columns.includes(c)}
+                            onChange={(e) => {
+                              const cols = e.target.checked ? [...m.E.columns, c] : m.E.columns.filter((x) => x !== c);
+                              setOptions({ ...options, entity: { ...options.entity, columns: cols } });
+                            }}
+                          />
+                          {c}
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+                ) : null}
               </div>
-            ));
+            ), showKeyChoice);
           }
           if (cat === 'T') {
             return card('T', (

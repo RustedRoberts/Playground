@@ -10,6 +10,7 @@ import { parseSimplePredicate } from '../src/engine/predicate';
 import { parseReferenceFile, roleForTable } from '../src/engine/reference';
 import type { ReferenceTable } from '../src/engine/types';
 import { buildRuleYaml } from '../src/engine/export';
+import { exportQueries } from '../src/engine/exportQueries';
 
 const dir = join(__dirname, '..', 'src', 'examples', 'encoded-powershell');
 const read = (f: string) => readFileSync(join(dir, f), 'utf8');
@@ -121,10 +122,12 @@ describe('Worked example end to end', () => {
     expect(out.modules.N.status).toBe('not-applicable');
   });
 
-  it('joins IdentityInfo on the strong identifier', () => {
-    expect(out.modules.E.pair?.left).toBe('AccountObjectId');
-    expect(out.text).toContain('| lookup kind=leftouter (');
-    expect(out.text).toContain('  ) on AccountObjectId');
+  it('joins IdentityInfo on the lower-cased standard key built from the strong identifier', () => {
+    expect(out.modules.E.candidate?.expression).toBe('AccountObjectId');
+    expect(out.text).toContain('| extend IdentityInfo_Key = tolower(AccountObjectId)\n| lookup kind=leftouter (');
+    expect(out.text).toContain('    | extend IdentityInfo_Key = tolower(AccountObjectId)');
+    expect(out.text).toContain('  ) on IdentityInfo_Key');
+    expect(out.text).toContain('| lookup kind=leftouter TiIndicators on ThreatIntel_Key');
   });
 
   it('prefers the initiating process hash for a system binary and reads ObservableKey from the sample', () => {
@@ -173,37 +176,76 @@ describe('Soundness gate', () => {
     const base: ReferenceTable = { id: 'b', name: 'MyTable', role: 'base', schema: [{ name: 'AccountName', type: 'string' }, { name: 'Timestamp', type: 'datetime' }], problems: [] };
     const id: ReferenceTable = { ...tables[1] };
     const out = improve({ query: 'MyTable\n| where Timestamp > ago(1h)\n| project AccountName', tables: [base, id], options: allOn, assessmentInputs: inputs });
-    expect(out.modules.E.pair?.strength).toBe('weak');
+    expect(out.modules.E.candidate?.strength).toBe('weak');
     expect(out.findings.some((f) => /Soundness warning/.test(f.title))).toBe(true);
   });
 });
 
-describe('Identifiers the rule derives itself (AuditLogs)', () => {
+describe('Nested identifiers and the standard key (AuditLogs)', () => {
   // AuditLogs has no top-level account identifier: they sit inside dynamic columns.
   const auditSchema = 'ColumnName,ColumnOrdinal,DataType,ColumnType\nTenantId,0,System.String,string\nTimeGenerated,2,System.DateTime,datetime\nOperationName,4,System.String,string\nInitiatedBy,20,System.Object,dynamic\nResult,22,System.String,string\nTargetResources,24,System.Object,dynamic\n';
   const audit: ReferenceTable = { id: 'auditlogs', name: 'AuditLogs', role: 'base', schema: parseReferenceFile('AuditLogs_schema.csv', auditSchema).schema, problems: [] };
   const identity: ReferenceTable = { ...tables[1], schema: [...tables[1].schema!, { name: 'TimeGenerated', type: 'datetime' }].filter((c) => c.name !== 'Timestamp') };
+  const run = (query: string, t: ReferenceTable[] = [audit, identity], entity = {}) =>
+    improve({ query, tables: t, options: { ...allOn, entity }, assessmentInputs: inputs });
 
-  it('uses a lower-cased object ID extracted by the rule as a strong join key', () => {
-    const rule = 'AuditLogs\n| where OperationName =~ "Delete user"\n| mv-expand TargetResources\n| extend AccountObjectId = tolower(tostring(TargetResources.id))\n| project TimeGenerated, OperationName, AccountObjectId';
-    const out = improve({ query: rule, tables: [audit, identity], options: allOn, assessmentInputs: inputs });
-    expect(out.modules.E.status).toBe('applied');
-    expect(out.modules.E.pair).toMatchObject({ left: 'AccountObjectId', strength: 'strong', derived: true, lowercase: true });
-    expect(out.text).toContain('| project AccountObjectId = tolower(AccountObjectId), Department, JobTitle, AccountDisplayName');
-    expect(out.text).toContain('| where TimeGenerated > ago(14d)');
+  it('offers the target and initiator from the built-in map', () => {
+    const out = run('AuditLogs\n| where OperationName =~ "Delete user"\n| project TimeGenerated, OperationName');
+    expect(out.modules.E.candidates.map((c) => c.id)).toEqual(['map:auditlogs-target', 'map:auditlogs-initiator']);
+    expect(out.text).toContain('| extend IdentityInfo_Key = tolower(tostring(TargetResources[0].id))');
     expect(out.findings.filter((f) => f.severity === 'fail')).toEqual([]);
+    const initiator = run('AuditLogs\n| project TimeGenerated', undefined, { candidateId: 'map:auditlogs-initiator' });
+    expect(initiator.text).toContain('tolower(tostring(InitiatedBy.user.id))');
   });
 
-  it('recognises derived names such as TargetAadUserId', () => {
-    const rule = 'AuditLogs\n| extend TargetAadUserId = tostring(TargetResources[0].id)\n| project TimeGenerated, TargetAadUserId';
-    const out = improve({ query: rule, tables: [audit, identity], options: allOn, assessmentInputs: inputs });
-    expect(out.modules.E.pair?.left).toBe('TargetAadUserId');
-    expect(out.text).toContain('| project TargetAadUserId = AccountObjectId');
+  it('drops the array index when the rule expands TargetResources', () => {
+    const out = run('AuditLogs\n| mv-expand TargetResources\n| project TimeGenerated');
+    expect(out.text).toContain('| extend IdentityInfo_Key = tolower(tostring(TargetResources.id))');
   });
 
-  it('explains where the identifiers are when the rule extracts none', () => {
-    const out = improve({ query: 'AuditLogs\n| where OperationName =~ "Delete user"\n| project TimeGenerated', tables: [audit, identity], options: allOn, assessmentInputs: inputs });
+  it('uses an identifier the rule derives, and a key the rule already creates', () => {
+    const derived = run('AuditLogs\n| mv-expand TargetResources\n| extend AccountObjectId = tolower(tostring(TargetResources.id))\n| project TimeGenerated, AccountObjectId');
+    expect(derived.modules.E.candidate).toMatchObject({ expression: 'AccountObjectId', source: 'derived', strength: 'strong' });
+    const ruleKey = run('AuditLogs\n| extend IdentityInfo_Key = tolower(tostring(TargetResources[0].id))\n| project TimeGenerated');
+    expect(ruleKey.modules.E.candidate?.source).toBe('rule-key');
+    // The rule already lower-cases its key, so no second extend is written on the base side.
+    expect(ruleKey.text.match(/^\| extend IdentityInfo_Key/gm)).toHaveLength(1);
+  });
+
+  it('accepts a custom expression', () => {
+    const out = run('AuditLogs\n| project TimeGenerated', undefined, { candidateId: 'override', overrideExpression: 'tostring(InitiatedBy.app.servicePrincipalId)', overrideRight: 'AccountObjectId' });
+    expect(out.modules.E.status).toBe('applied');
+    expect(out.text).toContain('tolower(tostring(InitiatedBy.app.servicePrincipalId))');
+  });
+
+  it('tests the lookup against samples through the nested path, ignoring case', () => {
+    const id = identity.sample![0].AccountObjectId as string;
+    const sample = [
+      { TimeGenerated: '2026-10-01', OperationName: 'Delete user', TargetResources: JSON.stringify([{ id: id.toUpperCase(), type: 'User' }]), InitiatedBy: '{}' },
+      { TimeGenerated: '2026-10-01', OperationName: 'Delete user', TargetResources: [{ id: 'not-in-identityinfo' }], InitiatedBy: {} },
+    ];
+    const out = run('AuditLogs\n| project TimeGenerated', [{ ...audit, sample }, identity]);
+    expect(out.findings.some((f) => f.title === '1 of 2 distinct identifiers in the sample have an IdentityInfo row')).toBe(true);
+  });
+
+  it('prefers the IdentityInfo_Key column when the samples were exported with it', () => {
+    const id = (identity.sample![0].AccountObjectId as string).toLowerCase();
+    const out = run('AuditLogs\n| project TimeGenerated', [{ ...audit, sample: [{ IdentityInfo_Key: id }] }, { ...identity, sample: [{ IdentityInfo_Key: id }] }]);
+    expect(out.findings.some((f) => f.title === '1 of 1 distinct identifiers in the sample have an IdentityInfo row')).toBe(true);
+  });
+
+  it('explains where to look when a table has only dynamic columns and no mapping', () => {
+    const other: ReferenceTable = { id: 'x', name: 'SomeAuditTable', role: 'base', schema: [{ name: 'TimeGenerated', type: 'datetime' }, { name: 'Actor', type: 'dynamic' }], problems: [] };
+    const out = run('SomeAuditTable\n| project TimeGenerated', [other, identity]);
     expect(out.modules.E.status).toBe('not-applicable');
-    expect(out.modules.E.summary).toContain('InitiatedBy, TargetResources');
+    expect(out.modules.E.summary).toContain('Custom expression');
+  });
+
+  it('writes the standard keys into the export queries', () => {
+    const out = run('AuditLogs\n| where OperationName =~ "Delete user"\n| project TimeGenerated');
+    const text = exportQueries(out.parsed, { includeIdentity: true, includeTi: false, identity: { expression: out.modules.E.candidate!.expression, right: 'AccountObjectId' } });
+    expect(text).toContain('| extend IdentityInfo_Key = tolower(tostring(TargetResources[0].id))');
+    expect(text).toContain('| extend IdentityInfo_Key = tolower(AccountObjectId)\n| where IdentityInfo_Key in (SampleKeys)');
+    expect(text).toContain('| summarize arg_max(TimeGenerated, *) by IdentityInfo_Key');
   });
 });
